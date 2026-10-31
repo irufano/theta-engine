@@ -38,6 +38,16 @@ pertama.
 
 ### Added
 
+- Lima kriteria seleksi item khusus `nfact = 1`: `Criterion::{Mlwi, Mpwi,
+  Mepv, Mei, Ikl}`. Kelimanya merata-ratakan besaran item kandidat atas
+  posterior `theta` lewat grid 61 titik pada `[-6, 6]` (aturan trapesium):
+  `Mlwi`/`Mpwi` informasi Fisher berbobot likelihood/posterior, `Mepv`
+  varians posterior yang diharapkan (nilai kriteria `-EPV`), `Mei` informasi
+  di estimasi sesudah respons, `Ikl` divergensi KL berbobot likelihood.
+  Pemakaian pada `nfact > 1` mengembalikan `McatError::InvalidParameter`.
+  Dokumen: `docs/teori/` dan `docs/panduan/02-item-selection-{mlwi,mpwi,
+  mepv,mei,ikl}.md`; contoh: `examples/02_item_selection_{mlwi,mpwi,mepv,
+  mei,ikl}.rs`; test: `tests/integration_item_selection_unidimensional.rs`.
 - Dukungan kompilasi `wasm32-unknown-unknown`: `rand` memakai
   `default-features = false, features = ["std_rng"]` sehingga `getrandom`
   tidak ikut ditarik. Perilaku tidak berubah: engine hanya memakai `StdRng`

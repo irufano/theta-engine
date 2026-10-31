@@ -1,6 +1,6 @@
 # theta-engine
 
-Engine Rust untuk **Multidimensional Computerized Adaptive Testing (MCAT)**, `nfact > 1` (multidimensional IRT). Didesain untuk dipakai sebagai dependency biasa di web API Rust (mis. Axum) atau project Rust lain, tanpa terikat framework tertentu.
+Engine Rust untuk **Multidimensional Computerized Adaptive Testing (MCAT)**, `nfact > 1` (multidimensional IRT). Kasus satu dimensi (`nfact = 1`) juga didukung. Didesain untuk dipakai sebagai dependency biasa di web API Rust (mis. Axum) atau project Rust lain, tanpa terikat framework tertentu.
 
 `theta-engine` **tidak** melakukan kalibrasi model IRT dari data respons
 mentah (EM/MH-RM, marginal maximum likelihood). Engine ini menerima
@@ -92,8 +92,13 @@ untuk quickstart lengkap fondasi IRT. Contoh lain per fase ada di
   untuk constraint konten yang kompleks.
 - Antarmuka penyajian tes (UI/GUI) — library ini hanya menyediakan logika
   administrasi tes adaptif; penyajian item jadi urusan aplikasi pemanggil.
-- Model IRT unidimensional non-MCAT bukan target utama, meski fondasi IRT
-  cukup umum sehingga `nfact == 1` otomatis valid sebagai kasus khusus.
+- Model IRT unidimensional bukan target utama, meski fondasi IRT cukup umum
+  sehingga `nfact == 1` otomatis valid sebagai kasus khusus. Untuk kasus itu
+  engine menyediakan lima kriteria seleksi tambahan yang hanya berlaku pada
+  `nfact = 1` (`Mlwi`, `Mpwi`, `Mepv`, `Mei`, `Ikl`; lih.
+  [`docs/panduan/02-item-selection-overview.md`](docs/panduan/02-item-selection-overview.md)).
+  Selain itu, `Criterion::DRule` dan kawan-kawannya pada `nfact = 1` setara
+  Maximum Fisher Information.
 
 ## Referensi
 

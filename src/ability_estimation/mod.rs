@@ -29,7 +29,7 @@
 
 pub mod eap_sum;
 
-mod density;
+pub(crate) mod density;
 mod eap;
 mod fixed;
 mod map;

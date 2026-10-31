@@ -37,8 +37,19 @@ let (chosen, _debug) =
 | Minimalkan varians estimasi (mendekati minimum error-variance) | `Criterion::ARule` |
 | Cegah satu dimensi terus terabaikan | `Criterion::ERule` |
 | Peduli skor komposit tertentu (`w' * theta`) | `Criterion::WRule` |
+| `nfact = 1`, seleksi memperhitungkan ketidakpastian `theta` (bobot likelihood) | `Criterion::Mlwi` |
+| `nfact = 1`, sama tetapi prior grup ikut menimbang (disarankan sebagai default 1D) | `Criterion::Mpwi` |
+| `nfact = 1`, minimalkan varians posterior yang diharapkan | `Criterion::Mepv` |
+| `nfact = 1`, informasi di estimasi sesudah respons | `Criterion::Mei` |
+| `nfact = 1`, berbasis KL tanpa parameter `delta` | `Criterion::Ikl` |
 
-Semua varian di atas punya field `prior: bool` — `true` memakai varian
+`Mlwi`, `Mpwi`, `Mepv`, `Mei`, dan `Ikl` **khusus `nfact = 1`** dan tidak punya
+field apa pun; pada `nfact > 1` keduanya mengembalikan `Err` (lih.
+`docs/teori/02-item-selection-overview.md` §1). Pada `nfact = 1`,
+D/T/A/E/W-rule sudah setara kriteria Maximum Fisher Information (informasi
+kandidat di `theta` saat ini), jadi tidak ada varian `Mfi` terpisah.
+
+Varian D/T/A/E/W-rule di atas punya field `prior: bool` — `true` memakai varian
 `*Prule` (lih. §4 dokumen teori). **Disarankan `prior: true`** di awal tes
 (saat item terjawab masih sedikit) untuk D/T/A/E/W-rule — tanpa prior,
 `Drule`/`Erule` khususnya degenerate (nilai kriteria persis nol untuk semua
@@ -106,8 +117,9 @@ itu tanggung jawab caller (biasanya: `(0..bank.len()).filter(|i|
 `examples/02_item_selection_*.rs`).
 
 Error (`Err(McatError)`) terjadi bila: `candidates` kosong, ada index di
-luar `bank`, atau panjang `weights` (default maupun manual) tidak cocok
-`nfact` — tidak pernah panic.
+luar `bank`, panjang `weights` (default maupun manual) tidak cocok
+`nfact`, atau kriteria khusus `nfact = 1` (`Mlwi`/`Mpwi`/`Mepv`/`Mei`/`Ikl`)
+dipakai pada `nfact > 1` — tidak pernah panic.
 
 ## Debug trace
 
@@ -121,6 +133,8 @@ println!("info sebelum/sesudah: {:?} -> {:?}", debug.info_before, debug.info_aft
 
 `candidate_scores` kosong untuk `Seq`/`Random` (tidak ada nilai kriteria
 untuk keduanya); `info_before`/`info_after` cuma `Some` untuk D/T/A/E/W-rule.
+Untuk `Mepv` nilai kriteria adalah `-EPV` (varians posterior yang diharapkan,
+dinegasikan), jadi selalu <= 0.
 Mengaktifkan debug **tidak** mengubah item yang dipilih — hanya menambah
 observability.
 
@@ -135,7 +149,12 @@ cargo run --example 02_item_selection_t_rule
 cargo run --example 02_item_selection_a_rule
 cargo run --example 02_item_selection_e_rule
 cargo run --example 02_item_selection_w_rule
+cargo run --example 02_item_selection_mlwi
+cargo run --example 02_item_selection_mpwi
+cargo run --example 02_item_selection_mepv
+cargo run --example 02_item_selection_mei
+cargo run --example 02_item_selection_ikl
 ```
 
 Panduan rinci per algoritma: `docs/panduan/02-item-selection-{seq,random,
-kl,d-rule,t-rule,a-rule,e-rule,w-rule}.md`.
+kl,d-rule,t-rule,a-rule,e-rule,w-rule,mlwi,mpwi,mepv,mei,ikl}.md`.

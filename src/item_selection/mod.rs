@@ -24,6 +24,12 @@
 //!   privat `criteria::kl`).
 //! - `seq`/`random`: baseline non-informasi (modul privat `criteria::seq`,
 //!   `criteria::random`).
+//! - `Mepv`, `Mlwi`, `Mpwi`, `Mei`, `Ikl`: kriteria **khusus `nfact = 1`**
+//!   yang merata-ratakan besaran item kandidat atas posterior `theta` lewat
+//!   grid kuadratur satu dimensi (modul privat `criteria::mepv`,
+//!   `criteria::mlwi`, `criteria::mpwi`, `criteria::mei`, `criteria::ikl`,
+//!   dengan grid bersama di `criteria::grid`). Dipakai pada `nfact > 1`
+//!   menghasilkan `McatError::InvalidParameter`, bukan hasil yang keliru.
 //!
 //! `total_info` untuk kriteria D/T/A/E/W-rule = `person.info_thetas(bank)` +
 //! info Fisher item kandidat pada `person.theta()`, ditambah
@@ -56,12 +62,14 @@ use crate::theta::{InfoMatrix, SEVector, ThetaVector};
 /// Index item di dalam `ItemBank`.
 pub type ItemIndex = usize;
 
-/// Kriteria seleksi item — enum **tertutup** berisi persis kriteria yang
-/// valid untuk `nfact > 1`. Kriteria yang tidak valid untuk
-/// multidimensional (`MI`, `MEPV`, `MLWI`, `MPWI`, `MEI`, seluruh `IKL*`)
-/// sengaja **tidak** dimodelkan: karena enum ini tertutup, mengonstruksi
-/// kriteria tidak valid mustahil dilakukan, sehingga validasi terjadi di
-/// compile time, bukan runtime (lih. `docs/teori/02-item-selection-overview.md`).
+/// Kriteria seleksi item — enum **tertutup**.
+///
+/// `Seq`, `Random`, `Kl`, `KlN`, dan D/T/A/E/W-rule berlaku untuk `nfact`
+/// berapa pun. `Mepv`, `Mlwi`, `Mpwi`, `Mei`, dan `Ikl` bersandar pada
+/// integrasi kuadratur atas grid `theta`, yang meledak secara kombinatorial
+/// di dimensi tinggi, sehingga hanya berlaku untuk `nfact = 1`: pemakaiannya
+/// pada `nfact > 1` ditolak dengan `McatError::InvalidParameter` saat
+/// seleksi (lih. `docs/teori/02-item-selection-overview.md`).
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Criterion {
@@ -84,6 +92,29 @@ pub enum Criterion {
         /// Setengah lebar interval KL sebelum dikalikan `sqrt(n_answered)`.
         delta: f64,
     },
+    /// Minimum Expected Posterior Variance (Owen, 1975; van der Linden,
+    /// 1998): pilih item yang membuat varians posterior `theta` paling kecil
+    /// setelah dijawab, dirata-ratakan atas kemungkinan jawaban. Nilai
+    /// kriteria adalah `-EPV` agar tetap dipilih lewat argmax. Hanya
+    /// `nfact = 1`.
+    Mepv,
+    /// Maximum Likelihood Weighted Information (Veerkamp & Berger, 1997):
+    /// informasi Fisher item kandidat dirata-ratakan atas `theta` dengan
+    /// bobot likelihood respons. Hanya `nfact = 1`.
+    Mlwi,
+    /// Maximum Posterior Weighted Information (van der Linden, 1998): seperti
+    /// `Mlwi`, tetapi bobotnya posterior (likelihood dikali prior grup).
+    /// Hanya `nfact = 1`.
+    Mpwi,
+    /// Maximum Expected Information (van der Linden, 1998): informasi Fisher
+    /// item kandidat di estimasi `theta` sesudah item itu dijawab,
+    /// dirata-ratakan atas kemungkinan jawaban. Hanya `nfact = 1`.
+    Mei,
+    /// Integrated Kullback-Leibler: divergensi KL antara distribusi respons
+    /// item di `theta` saat ini dan di setiap `theta` lain, dirata-ratakan
+    /// dengan bobot likelihood. Berbeda dari `Kl`/`KlN` (dua titik ujung,
+    /// butuh `delta`). Hanya `nfact = 1`.
+    Ikl,
     /// D-optimality: maksimalkan determinan info Fisher kumulatif.
     DRule {
         /// `true` -> tambahkan `inverse(gcov)` ke info Fisher kumulatif
@@ -442,6 +473,29 @@ pub fn rank_candidates(
             }
             Ok(scores)
         }
+        Criterion::Mepv | Criterion::Mlwi | Criterion::Mpwi | Criterion::Mei | Criterion::Ikl => {
+            let name = match config.criterion {
+                Criterion::Mepv => "Mepv",
+                Criterion::Mlwi => "Mlwi",
+                Criterion::Mpwi => "Mpwi",
+                Criterion::Mei => "Mei",
+                _ => "Ikl",
+            };
+            let grid = criteria::grid::Grid1d::build(person, bank, group, name)?;
+            let mut scores = Vec::with_capacity(candidates.len());
+            for &idx in candidates {
+                let item = get_item(idx)?;
+                let s = match config.criterion {
+                    Criterion::Mepv => criteria::mepv::score(&grid, item)?,
+                    Criterion::Mlwi => criteria::mlwi::score(&grid, item)?,
+                    Criterion::Mpwi => criteria::mpwi::score(&grid, item)?,
+                    Criterion::Mei => criteria::mei::score(&grid, item)?,
+                    _ => criteria::ikl::score(&grid, item, person.theta())?,
+                };
+                scores.push((idx, s));
+            }
+            Ok(scores)
+        }
         Criterion::DRule { prior }
         | Criterion::TRule { prior }
         | Criterion::ARule { prior }
@@ -535,7 +589,13 @@ pub fn select_next_item(
             });
             Ok((chosen, debug))
         }
-        Criterion::Kl { .. } | Criterion::KlN { .. } => {
+        Criterion::Kl { .. }
+        | Criterion::KlN { .. }
+        | Criterion::Mepv
+        | Criterion::Mlwi
+        | Criterion::Mpwi
+        | Criterion::Mei
+        | Criterion::Ikl => {
             let scores = rank_candidates(config, candidates, person, bank, group)?;
             let chosen = argmax(&scores)?;
             let debug = config.debug.then_some(ItemSelectionDebug {

@@ -116,5 +116,63 @@ fn bench_ability_estimation(c: &mut CriterionHarness) {
     group_bench.finish();
 }
 
-criterion_group!(benches, bench_item_selection, bench_ability_estimation);
+/// Kriteria khusus `nfact = 1` pada bank 500 item 2PL satu dimensi dengan
+/// `N_ANSWERED` jawaban: biaya merata-ratakan atas grid 61 titik.
+fn bench_item_selection_1d(c: &mut CriterionHarness) {
+    let mut rng = StdRng::seed_from_u64(42);
+    let mut bank = ItemBank::new();
+    for i in 0..N_ITEMS {
+        let a = rand::Rng::gen_range(&mut rng, 0.4..1.6);
+        let d = rand::Rng::gen_range(&mut rng, -2.0..2.0);
+        bank.push(
+            Box::new(Dichotomous::m2pl(vec![a], d).unwrap()),
+            ItemMeta::new(i),
+        )
+        .unwrap();
+    }
+    let group = GroupParams::standard_normal(1);
+    let mut person = PersonState::from_theta(theta_engine::ThetaVector::zeros(1));
+    for i in 0..N_ANSWERED {
+        person.record_answer(i, i % 2);
+    }
+    let config = EstimationConfig {
+        method: Method::Eap { qmc: false },
+        ..Default::default()
+    };
+    let ((theta, se), _) = estimate(&config, &person, &bank, &group).unwrap();
+    person.set_estimate(theta, se);
+    let candidates: Vec<usize> = (N_ANSWERED..N_ITEMS).collect();
+    let mut select_rng = StdRng::seed_from_u64(123);
+
+    let criteria: Vec<(&str, SelectionCriterion)> = vec![
+        ("d_rule", SelectionCriterion::DRule { prior: true }),
+        ("mlwi", SelectionCriterion::Mlwi),
+        ("mpwi", SelectionCriterion::Mpwi),
+        ("mepv", SelectionCriterion::Mepv),
+        ("mei", SelectionCriterion::Mei),
+        ("ikl", SelectionCriterion::Ikl),
+    ];
+
+    let mut group_bench = c.benchmark_group("item_selection_1d");
+    for (name, criterion) in criteria {
+        let config = SelectionConfig {
+            criterion,
+            ..Default::default()
+        };
+        group_bench.bench_with_input(BenchmarkId::from_parameter(name), &config, |b, config| {
+            b.iter(|| {
+                select_next_item(config, &candidates, &person, &bank, &group, &mut select_rng)
+                    .unwrap()
+            });
+        });
+    }
+    group_bench.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_item_selection,
+    bench_item_selection_1d,
+    bench_ability_estimation
+);
 criterion_main!(benches);
