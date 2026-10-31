@@ -1,0 +1,36 @@
+//! Trait inti model respons item, dengan permukaan minimal yang dibutuhkan
+//! `theta-engine`: probabilitas kategori dan informasi Fisher pada satu
+//! titik `theta`.
+
+use crate::error::McatError;
+use crate::theta::{InfoMatrix, ThetaVector};
+
+/// Model respons item multidimensional (dikotomus atau politomus).
+///
+/// Implementor bertanggung jawab menghitung probabilitas tiap kategori
+/// respons dan matriks informasi Fisher `nfact × nfact` pada sebuah titik
+/// `theta`, mengikuti formula tertutup di Reckase (2009) —
+/// lih. `docs/teori/00-fondasi-irt-multidimensional.md`.
+///
+/// Supertrait `Send + Sync` -- `ItemBank` menyimpan `Box<dyn
+/// ItemResponseModel>`, dan tanpa bound ini `ItemBank` tidak bisa dibagi
+/// lintas thread sama sekali (mis. state bersama di web server async, yang
+/// mensyaratkan `Send + Sync + 'static`). Tidak membebani implementor
+/// manapun: `Dichotomous`/`GradedResponse` (satu-satunya implementor saat
+/// ini) cuma berisi `Vec<f64>`/`f64` polos, sudah `Send + Sync` otomatis.
+pub trait ItemResponseModel: Send + Sync {
+    /// Jumlah dimensi laten (`nfact`) yang diharapkan pada `theta`.
+    fn nfact(&self) -> usize;
+
+    /// Jumlah kategori respons (2 untuk item dikotomus, `>2` untuk politomus).
+    fn n_categories(&self) -> usize;
+
+    /// Probabilitas tiap kategori respons pada `theta`, menjumlah ke 1.
+    /// Error bila panjang `theta` tidak sama dengan `nfact()`.
+    fn probabilities(&self, theta: &ThetaVector) -> Result<Vec<f64>, McatError>;
+
+    /// Matriks informasi Fisher `nfact × nfact` pada `theta`:
+    /// `I(theta) = sum_k outer(grad P_k(theta), grad P_k(theta)) / P_k(theta)`
+    /// (bentuk multidimensional, matriks penuh `nfact × nfact`).
+    fn information(&self, theta: &ThetaVector) -> Result<InfoMatrix, McatError>;
+}
