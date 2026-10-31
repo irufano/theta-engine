@@ -1,0 +1,1090 @@
+//! Fase 2 — Algoritma Pemilihan Item (Item Selection) khusus `nfact > 1`.
+//!
+//! Formula tiap kriteria diverifikasi numerik terhadap nilai acuan pada item
+//! bank sintetis — lih. `docs/teori/02-item-selection-*.md` untuk rincian &
+//! rujukan akademik tiap kriteria:
+//!
+//! - `Drule`/`DPrule`: `det(total_info)` (modul privat `criteria::d_rule`).
+//! - `Trule`/`TPrule`: `sum_i weights[i] * total_info[i,i]` (trace berbobot
+//!   `tr(W I)` dengan `W = diag(weights)`: jumlah berbobot informasi per
+//!   dimensi, diagonal saja — modul privat `criteria::t_rule`).
+//! - `Arule`/`APrule`: `-sum_i weights[i] * pseudo_inverse(total_info)[i,i]`
+//!   (pseudo-invers, bukan invers biasa — matriks informasi dari satu item
+//!   dikotomus tunggal selalu rank 1, umum singular di awal tes — modul
+//!   privat `criteria::a_rule`).
+//! - `Erule`/`EPrule`: `min_eigenvalue(total_info)` (modul privat
+//!   `criteria::e_rule`).
+//! - `Wrule`/`WPrule`: `weights' * total_info * weights` (bentuk kuadratik
+//!   penuh, beda dari `Trule` yang cuma diagonal — modul privat
+//!   `criteria::w_rule`).
+//! - `KL`/`KLn`: pendekatan pointwise milik engine ini, yaitu divergensi KL
+//!   antara probabilitas kategori item kandidat di `theta + delta` dan
+//!   `theta - delta` (bukan kumulatif, bukan indeks KL global Chang & Ying).
+//!   `KLn` melebarkan `delta` menjadi `delta * sqrt(n_answered)` (modul
+//!   privat `criteria::kl`).
+//! - `seq`/`random`: baseline non-informasi (modul privat `criteria::seq`,
+//!   `criteria::random`).
+//!
+//! `total_info` untuk kriteria D/T/A/E/W-rule = `person.info_thetas(bank)` +
+//! info Fisher item kandidat pada `person.theta()`, ditambah
+//! `inverse(gcov)` bila varian `*Prule` (`prior: true`).
+//!
+//! **Catatan penting soal `info_thetas`**: `PersonState` menyimpan daftar
+//! index item yang sudah dijawab, **bukan** matriks akumulasi yang
+//! di-update inkremental. `info_thetas(bank)` menghitung ULANG dari nol tiap
+//! dipanggil: jumlah info Fisher seluruh item terjawab, dievaluasi di
+//! `theta` **saat ini** (bukan di theta saat masing-masing item dijawab).
+//! Jadi tiap kali dipanggil, ia menjumlahkan `FI(item, theta_terbaru)`
+//! untuk seluruh item yang sudah dijawab — bukan mengakumulasi kontribusi
+//! item lama yang dihitung di theta lama (yang jadi "basi"/stale begitu
+//! theta diestimasi ulang setelah item berikutnya). Karena estimasi ulang
+//! `theta` antar-item adalah pekerjaan Fase 3 (belum ada), keputusan desain
+//! ini memastikan Fase 2 tetap benar begitu Fase 3 terpasang, tanpa perlu
+//! desain ulang `PersonState`.
+
+pub mod criteria;
+
+use std::time::Duration;
+
+use rand::Rng;
+
+use crate::bank::{GroupParams, ItemBank};
+use crate::error::McatError;
+use crate::irt::{cumulative_information, ItemResponseModel};
+use crate::theta::{InfoMatrix, SEVector, ThetaVector};
+
+/// Index item di dalam `ItemBank`.
+pub type ItemIndex = usize;
+
+/// Kriteria seleksi item — enum **tertutup** berisi persis kriteria yang
+/// valid untuk `nfact > 1`. Kriteria yang tidak valid untuk
+/// multidimensional (`MI`, `MEPV`, `MLWI`, `MPWI`, `MEI`, seluruh `IKL*`)
+/// sengaja **tidak** dimodelkan: karena enum ini tertutup, mengonstruksi
+/// kriteria tidak valid mustahil dilakukan, sehingga validasi terjadi di
+/// compile time, bukan runtime (lih. `docs/teori/02-item-selection-overview.md`).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum Criterion {
+    /// Baseline non-adaptif: item bank disajikan berurutan (default).
+    #[default]
+    Seq,
+    /// Baseline exposure-neutral: pilih uniform random dari kandidat.
+    Random,
+    /// Divergensi KL antara dua titik ujung `theta - delta` dan `theta + delta`
+    /// pada item kandidat (pendekatan pointwise milik engine ini, bukan indeks
+    /// KL global Chang & Ying, 1996). Lebar `delta` tetap.
+    Kl {
+        /// Setengah lebar interval KL, tetap (tidak diskalakan).
+        delta: f64,
+    },
+    /// Sama seperti `Kl`, tetapi lebar interval dilebarkan menjadi
+    /// `delta * sqrt(n_answered)` (konvensi engine; pada `n_answered = 0` skor
+    /// semua kandidat nol).
+    KlN {
+        /// Setengah lebar interval KL sebelum dikalikan `sqrt(n_answered)`.
+        delta: f64,
+    },
+    /// D-optimality: maksimalkan determinan info Fisher kumulatif.
+    DRule {
+        /// `true` -> tambahkan `inverse(gcov)` ke info Fisher kumulatif
+        /// (varian `*Prule`).
+        prior: bool,
+    },
+    /// Maksimalkan trace berbobot `tr(W I)` dari info Fisher kumulatif, yaitu
+    /// jumlah berbobot informasi tiap dimensi (Mulder & van der Linden, 2009).
+    TRule {
+        /// `true` -> tambahkan `inverse(gcov)` ke info Fisher kumulatif
+        /// (varian `*Prule`).
+        prior: bool,
+    },
+    /// Minimalkan `tr(W I^-1)`, jumlah berbobot varians asimtotik tiap dimensi
+    /// (van der Linden, 1999). Engine memakai pseudo-invers sebagai ganti
+    /// invers biasa, dan nilai kriteria dinegasikan agar konsisten dengan
+    /// argmax.
+    ARule {
+        /// `true` -> tambahkan `inverse(gcov)` ke info Fisher kumulatif
+        /// (varian `*Prule`).
+        prior: bool,
+    },
+    /// Maksimalkan eigenvalue minimum info Fisher kumulatif.
+    ERule {
+        /// `true` -> tambahkan `inverse(gcov)` ke info Fisher kumulatif
+        /// (varian `*Prule`).
+        prior: bool,
+    },
+    /// Maksimalkan `w' I w`, informasi Fisher tentang skor komposit `w' theta`
+    /// (van der Linden, 1999), dengan `w` = `weights`.
+    WRule {
+        /// `true` -> tambahkan `inverse(gcov)` ke info Fisher kumulatif
+        /// (varian `*Prule`).
+        prior: bool,
+    },
+}
+
+/// Konfigurasi seleksi item.
+#[derive(Debug, Clone, PartialEq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct SelectionConfig {
+    /// Kriteria seleksi item yang dipakai.
+    pub criterion: Criterion,
+    /// Bobot per-dimensi `W`/`w`, dipakai `TRule`/`ARule` (sebagai
+    /// `diag(weights)`) dan `WRule` (sebagai vektor komposit), beserta varian
+    /// `prior`. `None` berarti `vec![1.0; nfact]`. Diabaikan kriteria lain.
+    pub weights: Option<Vec<f64>>,
+    /// Aktifkan jejak debug (prinsip desain #7). Default `false`.
+    pub debug: bool,
+}
+
+impl SelectionConfig {
+    /// Konstruktor yang memvalidasi panjang `weights` (bila diberikan)
+    /// terhadap `nfact`. Error `McatError::DimensionMismatch` bila tidak
+    /// cocok — pola sama seperti `weights` di `initial_theta::InitialThetaConfig`.
+    pub fn new(
+        criterion: Criterion,
+        weights: Option<Vec<f64>>,
+        nfact: usize,
+        debug: bool,
+    ) -> Result<Self, McatError> {
+        if let Some(w) = &weights {
+            if w.len() != nfact {
+                return Err(McatError::DimensionMismatch {
+                    expected: nfact,
+                    actual: w.len(),
+                    context: "SelectionConfig::new: weights",
+                });
+            }
+        }
+        Ok(Self {
+            criterion,
+            weights,
+            debug,
+        })
+    }
+}
+
+/// State satu peserta yang relevan untuk seleksi item & estimasi kemampuan:
+/// estimasi `theta`/SE saat ini dan daftar item yang sudah dijawab (index +
+/// kategori respons) — dipakai lintas fase berikutnya (estimasi kemampuan,
+/// stopping rule, dst.).
+///
+/// Sengaja **tidak** menyimpan matriks informasi kumulatif langsung sebagai
+/// field — lih. catatan modul di atas soal kenapa `info_thetas` harus
+/// dihitung ulang dari daftar item terjawab tiap dipanggil, bukan
+/// diakumulasi inkremental.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct PersonState {
+    theta: ThetaVector,
+    se: SEVector,
+    /// `theta` sebelum update terakhir (`set_theta`/`set_estimate`) --
+    /// `None` sebelum estimasi ulang pertama kali dilakukan. Dipakai Fase 4
+    /// (stopping rule) untuk evaluasi `met_delta_thetas` (`|Δtheta|` antar
+    /// langkah terakhir, `theta - previous_theta`) tanpa perlu membaca
+    /// riwayat penuh -- hanya nilai sebelumnya yang pernah relevan.
+    previous_theta: Option<ThetaVector>,
+    /// Riwayat penuh `theta`/SE tiap kali `set_theta`/`set_estimate`
+    /// dipanggil (satu baris per re-estimasi, biasanya satu per item
+    /// terjawab). **Desain**: `theta` AWAL (pra-tes) sengaja TIDAK disisipkan
+    /// sebagai baris pertama sebelum item manapun dijawab (yang akan membuat
+    /// panjangnya `N_item + 1`); riwayat kosong sampai re-estimasi PERTAMA terjadi,
+    /// sehingga panjangnya persis `N_item` (selaras dengan `answered_items`,
+    /// dipakai Fase 7 `McatResult::thetas_history`/`thetas_se_history` --
+    /// lih. `docs/teori/07-hasil-akhir-theta.md`).
+    thetas_history: Vec<ThetaVector>,
+    thetas_se_history: Vec<SEVector>,
+    answered_items: Vec<ItemIndex>,
+    /// Kategori respons per item terjawab, paralel dengan `answered_items`
+    /// (index `i` di sini adalah kategori respons untuk `answered_items[i]`).
+    /// Dibutuhkan Fase 3 (likelihood butuh tahu kategori yang benar-benar
+    /// dijawab, bukan cuma item mana yang diadministrasikan).
+    responses: Vec<usize>,
+    /// Waktu yang dihabiskan per item terjawab --
+    /// dipakai Fase 4 untuk evaluasi `max_time`. Tidak perlu
+    /// paralel 1:1 dengan `answered_items` (boleh kosong bila timing tidak
+    /// dilacak) -- `total_time()` lantas selalu nol, artinya batas
+    /// `max_time` efektif tidak pernah tercapai, konsisten dengan default
+    /// `max_time = None` (tak terbatas) saat fitur ini tidak dipakai.
+    item_times: Vec<Duration>,
+}
+
+impl PersonState {
+    /// State awal: `theta`/SE nol, belum ada item terjawab. `SE` nol di sini
+    /// hanya placeholder mentah (sama seperti `theta` nol) — pemakaian nyata
+    /// semestinya lewat `from_theta_and_se` dengan hasil `initial_theta::initialize`.
+    pub fn new(nfact: usize) -> Self {
+        Self {
+            theta: ThetaVector::zeros(nfact),
+            se: SEVector::zeros(nfact),
+            previous_theta: None,
+            thetas_history: Vec::new(),
+            thetas_se_history: Vec::new(),
+            answered_items: Vec::new(),
+            responses: Vec::new(),
+            item_times: Vec::new(),
+        }
+    }
+
+    /// State awal dengan `theta` tertentu (mis. hasil `initial_theta::initialize`),
+    /// SE nol placeholder (lih. catatan `new`).
+    pub fn from_theta(theta: ThetaVector) -> Self {
+        let nfact = theta.nfact();
+        Self {
+            theta,
+            se: SEVector::zeros(nfact),
+            previous_theta: None,
+            thetas_history: Vec::new(),
+            thetas_se_history: Vec::new(),
+            answered_items: Vec::new(),
+            responses: Vec::new(),
+            item_times: Vec::new(),
+        }
+    }
+
+    /// State awal dengan `theta` & SE tertentu (mis. hasil
+    /// `initial_theta::initialize`, yang mengembalikan keduanya sekaligus).
+    pub fn from_theta_and_se(theta: ThetaVector, se: SEVector) -> Self {
+        Self {
+            theta,
+            se,
+            previous_theta: None,
+            thetas_history: Vec::new(),
+            thetas_se_history: Vec::new(),
+            answered_items: Vec::new(),
+            responses: Vec::new(),
+            item_times: Vec::new(),
+        }
+    }
+
+    /// `nfact` peserta (dari `theta`).
+    pub fn nfact(&self) -> usize {
+        self.theta.nfact()
+    }
+
+    /// Estimasi `theta` saat ini.
+    pub fn theta(&self) -> &ThetaVector {
+        &self.theta
+    }
+
+    /// SE `theta` saat ini.
+    pub fn se(&self) -> &SEVector {
+        &self.se
+    }
+
+    /// Perbarui estimasi `theta` saja (dipakai test/eksperimen yang tidak
+    /// peduli SE). Untuk hasil `ability_estimation::estimate`, pakai
+    /// `set_estimate` yang memperbarui `theta` & SE sekaligus.
+    ///
+    /// `theta` lama disimpan ke `previous_theta` sebelum ditimpa (lih. field
+    /// `previous_theta` -- dipakai Fase 4 untuk `met_delta_thetas`).
+    pub fn set_theta(&mut self, theta: ThetaVector) {
+        self.previous_theta = Some(std::mem::replace(&mut self.theta, theta));
+        self.thetas_history.push(self.theta.clone());
+        self.thetas_se_history.push(self.se.clone());
+    }
+
+    /// Perbarui `theta` & SE sekaligus — dipakai hasil `ability_estimation::estimate`
+    /// (Fase 3). `theta` lama disimpan ke `previous_theta` (lih. `set_theta`).
+    pub fn set_estimate(&mut self, theta: ThetaVector, se: SEVector) {
+        self.previous_theta = Some(std::mem::replace(&mut self.theta, theta));
+        self.se = se;
+        self.thetas_history.push(self.theta.clone());
+        self.thetas_se_history.push(self.se.clone());
+    }
+
+    /// `theta` sebelum update terakhir -- `None` sebelum estimasi ulang
+    /// pertama kali dilakukan (mis. sebelum item pertama dijawab & di
+    /// re-estimasi). Dipakai Fase 4 untuk evaluasi `met_delta_thetas`.
+    pub fn previous_theta(&self) -> Option<&ThetaVector> {
+        self.previous_theta.as_ref()
+    }
+
+    /// Riwayat penuh `theta` tiap re-estimasi (`set_theta`/`set_estimate`) --
+    /// satu baris per item terjawab (bukan `N_item + 1`, lih.
+    /// catatan field `thetas_history`). Dipakai Fase 7 (`McatResult`).
+    pub fn thetas_history(&self) -> &[ThetaVector] {
+        &self.thetas_history
+    }
+
+    /// Riwayat penuh SE tiap re-estimasi, sejalan dengan `thetas_history()`.
+    pub fn thetas_se_history(&self) -> &[SEVector] {
+        &self.thetas_se_history
+    }
+
+    /// Jumlah item yang sudah dijawab.
+    pub fn n_answered(&self) -> usize {
+        self.answered_items.len()
+    }
+
+    /// Index item (`ItemBank`) yang sudah dijawab, terurut sesuai urutan
+    /// penyajian.
+    pub fn answered_items(&self) -> &[ItemIndex] {
+        &self.answered_items
+    }
+
+    /// Kategori respons per item terjawab, paralel dengan `answered_items()`.
+    pub fn responses(&self) -> &[usize] {
+        &self.responses
+    }
+
+    /// Catat satu item terjawab (index `ItemBank`) beserta kategori respons
+    /// yang dipilih (index kategori, 0-based -- mis. 0/1 untuk item
+    /// dikotomus). Tidak memvalidasi index/kategori terhadap bank di sini —
+    /// validasi terjadi lazily saat `info_thetas()`/estimasi kemampuan
+    /// dipanggil (butuh akses `&ItemBank`).
+    pub fn record_answer(&mut self, item_index: ItemIndex, response: usize) {
+        self.answered_items.push(item_index);
+        self.responses.push(response);
+    }
+
+    /// Catat waktu yang dihabiskan untuk satu item.
+    /// Dipakai Fase 4 untuk evaluasi `max_time`. Opsional: bila tidak pernah
+    /// dipanggil, `total_time()` selalu nol (lih. catatan field `item_times`).
+    pub fn record_item_time(&mut self, duration: Duration) {
+        self.item_times.push(duration);
+    }
+
+    /// Total waktu terpakai sejauh ini (jumlah seluruh `record_item_time`).
+    pub fn total_time(&self) -> Duration {
+        self.item_times.iter().sum()
+    }
+
+    /// Matriks informasi Fisher kumulatif dari seluruh item terjawab,
+    /// dihitung ulang di `theta` **saat ini** (bukan diakumulasi bertahap —
+    /// lih. catatan modul di atas). Memakai [`cumulative_information`]
+    /// (Fase 0) yang sudah ada & teruji.
+    ///
+    /// Error bila ada index item terjawab yang di luar jangkauan `bank`.
+    pub fn info_thetas(&self, bank: &ItemBank) -> Result<InfoMatrix, McatError> {
+        let mut items = Vec::with_capacity(self.answered_items.len());
+        for &idx in &self.answered_items {
+            let item = bank.item(idx).ok_or_else(|| {
+                McatError::InvalidParameter(format!(
+                    "PersonState::info_thetas: index item {idx} di luar jangkauan ItemBank"
+                ))
+            })?;
+            items.push(item);
+        }
+        cumulative_information(self.nfact(), items, &self.theta)
+    }
+}
+
+/// Jejak debug opsional dari [`select_next_item`] — hanya `Some` bila
+/// `SelectionConfig::debug == true`; tidak memengaruhi item yang dipilih
+/// (prinsip desain #7).
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct ItemSelectionDebug {
+    /// Nilai kriteria mentah tiap kandidat (index item bank, nilai kriteria).
+    /// Kosong untuk `Seq`/`Random` (tidak ada nilai kriteria untuk keduanya).
+    pub candidate_scores: Vec<(ItemIndex, f64)>,
+    /// Item yang akhirnya dipilih.
+    pub chosen: ItemIndex,
+    /// Snapshot `info_thetas` sebelum item terpilih ditambahkan — `Some`
+    /// hanya untuk kriteria D/T/A/E/W-rule.
+    pub info_before: Option<InfoMatrix>,
+    /// Snapshot `info_thetas` seandainya item terpilih ditambahkan — `Some`
+    /// hanya untuk kriteria D/T/A/E/W-rule.
+    pub info_after: Option<InfoMatrix>,
+}
+
+/// Hitung nilai kriteria mentah tiap `candidates` sesuai `config.criterion`,
+/// tanpa memilih argmax-nya -- dipakai `select_next_item` (yang menambah
+/// argmax + snapshot info di atasnya) dan `exposure_control::select_with_exposure`
+/// (Fase 5, yang butuh ranking penuh semua kandidat, bukan cuma item
+/// terbaik).
+///
+/// **`Criterion::Seq`/`Random` tidak punya nilai kriteria** -- keduanya
+/// memilih item tanpa menghitung skor kandidat sama sekali, jadi exposure
+/// control pun tidak pernah diterapkan untuk kriteria ini. Fungsi ini
+/// mengembalikan error `InvalidParameter`, bukan `Vec` kosong (kosong bisa
+/// disalahartikan "semua kandidat exhausted").
+///
+/// Error bila `candidates` kosong, ada index kandidat di luar `bank`, atau
+/// panjang `weights` (default maupun manual) tidak cocok `nfact`.
+pub fn rank_candidates(
+    config: &SelectionConfig,
+    candidates: &[ItemIndex],
+    person: &PersonState,
+    bank: &ItemBank,
+    group: &GroupParams,
+) -> Result<Vec<(ItemIndex, f64)>, McatError> {
+    if candidates.is_empty() {
+        return Err(McatError::InvalidParameter(
+            "rank_candidates: candidates kosong -- tidak ada item tersisa untuk dipilih".into(),
+        ));
+    }
+
+    let get_item = |idx: ItemIndex| -> Result<&dyn ItemResponseModel, McatError> {
+        bank.item(idx).ok_or_else(|| {
+            McatError::InvalidParameter(format!(
+                "rank_candidates: index item {idx} di luar jangkauan ItemBank"
+            ))
+        })
+    };
+
+    match config.criterion {
+        Criterion::Seq | Criterion::Random => Err(McatError::InvalidParameter(
+            "rank_candidates: Seq/Random tidak punya nilai kriteria -- keduanya \
+             memilih item tanpa menghitung skor, jadi exposure control tidak berlaku"
+                .into(),
+        )),
+        Criterion::Kl { delta } | Criterion::KlN { delta } => {
+            let effective_delta = if matches!(config.criterion, Criterion::KlN { .. }) {
+                criteria::kl::widened_delta(delta, person.n_answered())
+            } else {
+                delta
+            };
+            let mut scores = Vec::with_capacity(candidates.len());
+            for &idx in candidates {
+                let item = get_item(idx)?;
+                let s = criteria::kl::symmetric_interval_kl(item, person.theta(), effective_delta)?;
+                scores.push((idx, s));
+            }
+            Ok(scores)
+        }
+        Criterion::DRule { prior }
+        | Criterion::TRule { prior }
+        | Criterion::ARule { prior }
+        | Criterion::ERule { prior }
+        | Criterion::WRule { prior } => {
+            let nfact = person.nfact();
+            let weights = match &config.weights {
+                Some(w) => {
+                    if w.len() != nfact {
+                        return Err(McatError::DimensionMismatch {
+                            expected: nfact,
+                            actual: w.len(),
+                            context: "rank_candidates: weights",
+                        });
+                    }
+                    w.clone()
+                }
+                None => vec![1.0; nfact],
+            };
+            let prior_info = if prior {
+                Some(group.gcov().inverse()?)
+            } else {
+                None
+            };
+            let info_before = person.info_thetas(bank)?;
+
+            let mut scores = Vec::with_capacity(candidates.len());
+            for &idx in candidates {
+                let item = get_item(idx)?;
+                let mut total = info_before.clone() + item.information(person.theta())?;
+                if let Some(pinfo) = &prior_info {
+                    total += pinfo;
+                }
+                let s = match config.criterion {
+                    Criterion::DRule { .. } => criteria::d_rule::score(&total),
+                    Criterion::TRule { .. } => criteria::t_rule::score(&total, &weights)?,
+                    Criterion::ARule { .. } => criteria::a_rule::score(&total, &weights)?,
+                    Criterion::ERule { .. } => criteria::e_rule::score(&total),
+                    Criterion::WRule { .. } => criteria::w_rule::score(&total, &weights)?,
+                    _ => unreachable!("cabang match sudah dibatasi ke D/T/A/E/W-rule"),
+                };
+                scores.push((idx, s));
+            }
+            Ok(scores)
+        }
+    }
+}
+
+/// Pilih item selanjutnya dari `candidates` (index `ItemBank` yang belum
+/// dijawab) sesuai `config.criterion`.
+///
+/// `group` dipakai varian `*Prule` (sumber `inverse(gcov)` sebagai informasi
+/// prior); diabaikan kriteria lain. `rng` dipakai kriteria `Random`;
+/// diabaikan kriteria lain — parameter ini sengaja eksplisit supaya `Random`
+/// bisa diuji deterministik & dipakai dengan seed tetap.
+///
+/// Error bila `candidates` kosong, ada index kandidat di luar `bank`, atau
+/// panjang `weights` (default maupun manual) tidak cocok `nfact`.
+pub fn select_next_item(
+    config: &SelectionConfig,
+    candidates: &[ItemIndex],
+    person: &PersonState,
+    bank: &ItemBank,
+    group: &GroupParams,
+    rng: &mut impl Rng,
+) -> Result<(ItemIndex, Option<ItemSelectionDebug>), McatError> {
+    if candidates.is_empty() {
+        return Err(McatError::InvalidParameter(
+            "select_next_item: candidates kosong -- tidak ada item tersisa untuk dipilih".into(),
+        ));
+    }
+
+    match config.criterion {
+        Criterion::Seq => {
+            let chosen = criteria::seq::select(candidates);
+            let debug = config.debug.then_some(ItemSelectionDebug {
+                candidate_scores: Vec::new(),
+                chosen,
+                info_before: None,
+                info_after: None,
+            });
+            Ok((chosen, debug))
+        }
+        Criterion::Random => {
+            let chosen = criteria::random::select(candidates, rng);
+            let debug = config.debug.then_some(ItemSelectionDebug {
+                candidate_scores: Vec::new(),
+                chosen,
+                info_before: None,
+                info_after: None,
+            });
+            Ok((chosen, debug))
+        }
+        Criterion::Kl { .. } | Criterion::KlN { .. } => {
+            let scores = rank_candidates(config, candidates, person, bank, group)?;
+            let chosen = argmax(&scores)?;
+            let debug = config.debug.then_some(ItemSelectionDebug {
+                candidate_scores: scores,
+                chosen,
+                info_before: None,
+                info_after: None,
+            });
+            Ok((chosen, debug))
+        }
+        Criterion::DRule { prior }
+        | Criterion::TRule { prior }
+        | Criterion::ARule { prior }
+        | Criterion::ERule { prior }
+        | Criterion::WRule { prior } => {
+            let scores = rank_candidates(config, candidates, person, bank, group)?;
+            let chosen = argmax(&scores)?;
+
+            let debug = if config.debug {
+                let prior_info = if prior {
+                    Some(group.gcov().inverse()?)
+                } else {
+                    None
+                };
+                let info_before = person.info_thetas(bank)?;
+                let chosen_item = bank.item(chosen).ok_or_else(|| {
+                    McatError::InvalidParameter(format!(
+                        "select_next_item: index item {chosen} di luar jangkauan ItemBank"
+                    ))
+                })?;
+                let mut info_after =
+                    info_before.clone() + chosen_item.information(person.theta())?;
+                if let Some(pinfo) = &prior_info {
+                    info_after += pinfo;
+                }
+                Some(ItemSelectionDebug {
+                    candidate_scores: scores,
+                    chosen,
+                    info_before: Some(info_before),
+                    info_after: Some(info_after),
+                })
+            } else {
+                None
+            };
+            Ok((chosen, debug))
+        }
+    }
+}
+
+/// Index dengan nilai kriteria maksimum; pada seri (tie), pilih yang
+/// **pertama muncul** (posisi terkecil di `scores` menang). `pub(crate)` --
+/// dipakai ulang oleh `exposure_control::randomesque` (Fase 5) untuk kasus
+/// `n = 1`, yang sama dengan memilih kandidat terbaik.
+pub(crate) fn argmax(scores: &[(ItemIndex, f64)]) -> Result<ItemIndex, McatError> {
+    scores
+        .iter()
+        .copied()
+        .fold(None::<(ItemIndex, f64)>, |best, (idx, val)| match best {
+            Some((_, best_val)) if best_val >= val => best,
+            _ => Some((idx, val)),
+        })
+        .map(|(idx, _)| idx)
+        .ok_or_else(|| {
+            McatError::InvalidParameter("select_next_item: tidak ada kandidat untuk argmax".into())
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bank::ItemMeta;
+    use crate::irt::Dichotomous;
+    use approx::assert_relative_eq;
+    use nalgebra::DMatrix;
+    use rand::rngs::StdRng;
+    use rand::SeedableRng;
+
+    fn bank_2d() -> ItemBank {
+        let mut bank = ItemBank::new();
+        // item0: kuat di dim1, item1: kuat di dim2, item2: seimbang.
+        bank.push(
+            Box::new(Dichotomous::m2pl(vec![2.0, 0.1], 0.0).unwrap()),
+            ItemMeta::new(0),
+        )
+        .unwrap();
+        bank.push(
+            Box::new(Dichotomous::m2pl(vec![0.1, 2.0], 0.0).unwrap()),
+            ItemMeta::new(1),
+        )
+        .unwrap();
+        bank.push(
+            Box::new(Dichotomous::m2pl(vec![1.0, 1.0], 0.0).unwrap()),
+            ItemMeta::new(2),
+        )
+        .unwrap();
+        bank
+    }
+
+    #[test]
+    fn selection_config_new_rejects_weights_length_mismatch() {
+        let err =
+            SelectionConfig::new(Criterion::TRule { prior: false }, Some(vec![1.0]), 2, false)
+                .unwrap_err();
+        assert_eq!(
+            err,
+            McatError::DimensionMismatch {
+                expected: 2,
+                actual: 1,
+                context: "SelectionConfig::new: weights",
+            }
+        );
+    }
+
+    #[test]
+    fn selection_config_default_is_seq_with_no_weights() {
+        let config = SelectionConfig::default();
+        assert_eq!(config.criterion, Criterion::Seq);
+        assert_eq!(config.weights, None);
+        assert!(!config.debug);
+    }
+
+    #[test]
+    fn person_state_record_answer_accumulates_info_and_count() {
+        let mut bank = ItemBank::new();
+        bank.push(
+            Box::new(Dichotomous::m2pl(vec![1.0, 0.5], 0.0).unwrap()),
+            ItemMeta::new(0),
+        )
+        .unwrap();
+        let item = bank.item(0).unwrap();
+
+        let mut person = PersonState::new(2);
+        assert_eq!(person.n_answered(), 0);
+        assert_relative_eq!(person.info_thetas(&bank).unwrap().trace(), 0.0);
+
+        person.record_answer(0, 1);
+        assert_eq!(person.n_answered(), 1);
+        assert_eq!(person.answered_items(), &[0]);
+        let expected = item.information(person.theta()).unwrap();
+        assert_relative_eq!(
+            person.info_thetas(&bank).unwrap().get(0, 0),
+            expected.get(0, 0),
+            epsilon = 1e-12
+        );
+
+        person.record_answer(0, 1);
+        assert_eq!(person.n_answered(), 2);
+        assert_relative_eq!(
+            person.info_thetas(&bank).unwrap().get(0, 0),
+            2.0 * expected.get(0, 0),
+            epsilon = 1e-12
+        );
+    }
+
+    #[test]
+    fn person_state_info_thetas_recomputes_at_current_theta_not_answer_time_theta() {
+        // Info item terjawab
+        // dievaluasi ULANG di theta TERBARU, bukan "dibekukan" di theta saat
+        // item itu dijawab.
+        let mut bank = ItemBank::new();
+        bank.push(
+            Box::new(Dichotomous::m2pl(vec![1.0, 0.5], 0.2).unwrap()),
+            ItemMeta::new(0),
+        )
+        .unwrap();
+        let item = bank.item(0).unwrap();
+
+        let mut person = PersonState::new(2);
+        person.record_answer(0, 1);
+        let info_at_zero = person.info_thetas(&bank).unwrap();
+
+        person.set_theta(ThetaVector::from_vec(vec![0.7, -0.4]));
+        let info_after_theta_change = person.info_thetas(&bank).unwrap();
+        let expected_at_new_theta = item.information(person.theta()).unwrap();
+
+        assert_relative_eq!(
+            info_after_theta_change.get(0, 0),
+            expected_at_new_theta.get(0, 0),
+            epsilon = 1e-12
+        );
+        assert!((info_after_theta_change.get(0, 0) - info_at_zero.get(0, 0)).abs() > 1e-9);
+    }
+
+    #[test]
+    fn person_state_info_thetas_errors_on_out_of_bank_answered_index() {
+        let bank = bank_2d();
+        let mut person = PersonState::new(2);
+        person.record_answer(999, 1);
+        assert!(person.info_thetas(&bank).is_err());
+    }
+
+    #[test]
+    fn person_state_previous_theta_is_none_until_first_update() {
+        let person = PersonState::new(2);
+        assert!(person.previous_theta().is_none());
+    }
+
+    #[test]
+    fn person_state_set_theta_tracks_previous_theta() {
+        let mut person = PersonState::from_theta(ThetaVector::from_vec(vec![0.0, 0.0]));
+        assert!(person.previous_theta().is_none());
+
+        person.set_theta(ThetaVector::from_vec(vec![0.5, -0.2]));
+        assert_eq!(
+            person.previous_theta(),
+            Some(&ThetaVector::from_vec(vec![0.0, 0.0]))
+        );
+        assert_eq!(person.theta(), &ThetaVector::from_vec(vec![0.5, -0.2]));
+
+        person.set_estimate(
+            ThetaVector::from_vec(vec![0.8, -0.1]),
+            SEVector::from_vec(vec![0.3, 0.3]),
+        );
+        assert_eq!(
+            person.previous_theta(),
+            Some(&ThetaVector::from_vec(vec![0.5, -0.2]))
+        );
+        assert_eq!(person.theta(), &ThetaVector::from_vec(vec![0.8, -0.1]));
+    }
+
+    #[test]
+    fn person_state_thetas_history_has_one_row_per_reestimation_not_nfact_plus_one() {
+        // Desain: tanpa baris pra-tes ke-0 (panjang N_item, bukan N_item + 1)
+        // -- lih. catatan field `thetas_history`.
+        let mut person = PersonState::from_theta_and_se(
+            ThetaVector::from_vec(vec![0.0, 0.0]),
+            SEVector::from_vec(vec![1.0, 1.0]),
+        );
+        assert!(person.thetas_history().is_empty());
+        assert!(person.thetas_se_history().is_empty());
+
+        person.set_estimate(
+            ThetaVector::from_vec(vec![0.3, -0.1]),
+            SEVector::from_vec(vec![0.6, 0.7]),
+        );
+        person.set_theta(ThetaVector::from_vec(vec![0.5, -0.2]));
+        person.set_estimate(
+            ThetaVector::from_vec(vec![0.8, -0.1]),
+            SEVector::from_vec(vec![0.3, 0.3]),
+        );
+
+        assert_eq!(person.thetas_history().len(), 3);
+        assert_eq!(person.thetas_se_history().len(), 3);
+        assert_eq!(
+            person.thetas_history()[0],
+            ThetaVector::from_vec(vec![0.3, -0.1])
+        );
+        assert_eq!(
+            person.thetas_history()[1],
+            ThetaVector::from_vec(vec![0.5, -0.2])
+        );
+        assert_eq!(
+            person.thetas_history()[2],
+            ThetaVector::from_vec(vec![0.8, -0.1])
+        );
+        // `set_theta` tidak mengubah SE -- baris ke-2 mewarisi SE dari baris ke-1.
+        assert_eq!(
+            person.thetas_se_history()[1],
+            SEVector::from_vec(vec![0.6, 0.7])
+        );
+        assert_eq!(
+            person.thetas_se_history()[2],
+            SEVector::from_vec(vec![0.3, 0.3])
+        );
+        // Baris terakhir selalu sejalan dengan `theta()`/`se()` saat ini.
+        assert_eq!(person.thetas_history().last(), Some(person.theta()));
+        assert_eq!(person.thetas_se_history().last(), Some(person.se()));
+    }
+
+    #[test]
+    fn person_state_total_time_sums_recorded_durations_and_defaults_to_zero() {
+        use std::time::Duration;
+
+        let mut person = PersonState::new(1);
+        assert_eq!(person.total_time(), Duration::ZERO);
+
+        person.record_item_time(Duration::from_secs(5));
+        person.record_item_time(Duration::from_secs(3));
+        assert_eq!(person.total_time(), Duration::from_secs(8));
+    }
+
+    #[test]
+    fn select_next_item_errors_on_empty_candidates() {
+        let bank = bank_2d();
+        let person = PersonState::new(2);
+        let group = GroupParams::standard_normal(2);
+        let config = SelectionConfig::default();
+        let mut rng = StdRng::seed_from_u64(0);
+        assert!(select_next_item(&config, &[], &person, &bank, &group, &mut rng).is_err());
+    }
+
+    #[test]
+    fn seq_picks_smallest_remaining_index() {
+        let bank = bank_2d();
+        let person = PersonState::new(2);
+        let group = GroupParams::standard_normal(2);
+        let config = SelectionConfig::default(); // Criterion::Seq
+        let mut rng = StdRng::seed_from_u64(0);
+        let (chosen, debug) =
+            select_next_item(&config, &[2, 0, 1], &person, &bank, &group, &mut rng).unwrap();
+        assert_eq!(chosen, 0);
+        assert!(debug.is_none());
+    }
+
+    #[test]
+    fn random_only_ever_picks_from_candidates_and_is_seed_reproducible() {
+        let bank = bank_2d();
+        let person = PersonState::new(2);
+        let group = GroupParams::standard_normal(2);
+        let config = SelectionConfig {
+            criterion: Criterion::Random,
+            ..Default::default()
+        };
+        let mut rng_a = StdRng::seed_from_u64(99);
+        let mut rng_b = StdRng::seed_from_u64(99);
+        for _ in 0..10 {
+            let (a, _) =
+                select_next_item(&config, &[0, 1, 2], &person, &bank, &group, &mut rng_a).unwrap();
+            let (b, _) =
+                select_next_item(&config, &[0, 1, 2], &person, &bank, &group, &mut rng_b).unwrap();
+            assert_eq!(a, b);
+            assert!([0, 1, 2].contains(&a));
+        }
+    }
+
+    #[test]
+    fn e_rule_accounts_for_accumulated_info_not_just_the_candidate_alone() {
+        // Info Fisher satu item dikotomus tunggal selalu rank 1, jadi tanpa
+        // info kumulatif SEMUA kandidat akan punya eigenvalue minimum ~0
+        // (tidak ada yang menang). Uji ini membuktikan `select_next_item`
+        // benar-benar menjumlahkan `person.info_thetas()` + info kandidat
+        // (bukan cuma info kandidat sendiri) sebelum mengevaluasi Erule --
+        // nilai referensi dihitung tangan (lih. komentar di bawah).
+        let mut bank = bank_2d();
+        bank.push(
+            Box::new(Dichotomous::m2pl(vec![1.5, 0.3], 0.0).unwrap()),
+            ItemMeta::new(3),
+        )
+        .unwrap();
+        let mut person = PersonState::new(2);
+        person.record_answer(3, 1); // seed: sudah dijawab, bukan kandidat
+
+        let group = GroupParams::standard_normal(2);
+        let config = SelectionConfig {
+            criterion: Criterion::ERule { prior: false },
+            ..Default::default()
+        };
+        let mut rng = StdRng::seed_from_u64(0);
+        let (chosen, debug) =
+            select_next_item(&config, &[0, 1, 2], &person, &bank, &group, &mut rng).unwrap();
+        // Seed sudah kaya informasi dim1 (a=[1.5,0.3]); dari 3 kandidat,
+        // item1 (a=[0.1,2.0], kuat di dim2) paling melengkapi eigenvalue
+        // minimum gabungan (hitungan tangan: min_eig gabungan candidate0
+        // ~0.008, candidate1 ~0.513, candidate2 ~0.090 -- candidate1 menang
+        // telak karena paling menambal dimensi yang lemah).
+        assert_eq!(chosen, 1);
+        assert!(debug.is_none());
+    }
+
+    #[test]
+    fn debug_true_contains_all_candidate_scores_without_changing_chosen_item() {
+        let bank = bank_2d();
+        let person = PersonState::new(2);
+        let group = GroupParams::standard_normal(2);
+        let config_no_debug = SelectionConfig {
+            criterion: Criterion::DRule { prior: false },
+            ..Default::default()
+        };
+        let mut rng = StdRng::seed_from_u64(0);
+        let (chosen_a, debug_a) = select_next_item(
+            &config_no_debug,
+            &[0, 1, 2],
+            &person,
+            &bank,
+            &group,
+            &mut rng,
+        )
+        .unwrap();
+        assert!(debug_a.is_none());
+
+        let config_debug = SelectionConfig {
+            criterion: Criterion::DRule { prior: false },
+            debug: true,
+            ..Default::default()
+        };
+        let (chosen_b, debug_b) =
+            select_next_item(&config_debug, &[0, 1, 2], &person, &bank, &group, &mut rng).unwrap();
+        assert_eq!(chosen_a, chosen_b);
+
+        let debug = debug_b.expect("debug=true harus menghasilkan Some");
+        assert_eq!(debug.chosen, chosen_b);
+        assert_eq!(debug.candidate_scores.len(), 3);
+        assert!(debug.info_before.is_some());
+        assert!(debug.info_after.is_some());
+    }
+
+    #[test]
+    fn prior_variant_differs_from_non_prior_when_gcov_is_not_identity() {
+        let bank = bank_2d();
+        let person = PersonState::new(2);
+        let gcov =
+            InfoMatrix::from_matrix(DMatrix::from_row_slice(2, 2, &[0.25, 0.0, 0.0, 4.0])).unwrap();
+        let group = GroupParams::new(ThetaVector::zeros(2), gcov).unwrap();
+
+        let config_plain = SelectionConfig {
+            criterion: Criterion::DRule { prior: false },
+            debug: true,
+            ..Default::default()
+        };
+        let config_prior = SelectionConfig {
+            criterion: Criterion::DRule { prior: true },
+            debug: true,
+            ..Default::default()
+        };
+        let mut rng = StdRng::seed_from_u64(0);
+        let (_, debug_plain) =
+            select_next_item(&config_plain, &[0, 1, 2], &person, &bank, &group, &mut rng).unwrap();
+        let (_, debug_prior) =
+            select_next_item(&config_prior, &[0, 1, 2], &person, &bank, &group, &mut rng).unwrap();
+
+        let plain_scores = debug_plain.unwrap().candidate_scores;
+        let prior_scores = debug_prior.unwrap().candidate_scores;
+        for ((_, plain_val), (_, prior_val)) in plain_scores.iter().zip(prior_scores.iter()) {
+            assert!((plain_val - prior_val).abs() > 1e-9);
+        }
+    }
+
+    #[test]
+    fn kln_uses_wider_effective_delta_as_n_answered_grows() {
+        let bank = bank_2d();
+        let group = GroupParams::standard_normal(2);
+        let config = SelectionConfig {
+            criterion: Criterion::KlN { delta: 0.1 },
+            debug: true,
+            ..Default::default()
+        };
+        let mut rng = StdRng::seed_from_u64(0);
+
+        let mut person_fresh = PersonState::new(2);
+        let (_, debug_fresh) =
+            select_next_item(&config, &[0], &person_fresh, &bank, &group, &mut rng).unwrap();
+
+        for _ in 0..4 {
+            person_fresh.record_answer(1, 1); // n_answered saja yang relevan untuk KLn
+        }
+        let (_, debug_after_4) =
+            select_next_item(&config, &[0], &person_fresh, &bank, &group, &mut rng).unwrap();
+
+        let score_fresh = debug_fresh.unwrap().candidate_scores[0].1;
+        let score_after_4 = debug_after_4.unwrap().candidate_scores[0].1;
+        // n_answered=0 -> delta efektif 0 -> KL persis 0; n_answered=4 -> delta*2.
+        assert_relative_eq!(score_fresh, 0.0, epsilon = 1e-12);
+        assert!(score_after_4 > score_fresh);
+    }
+
+    fn bank_3d() -> ItemBank {
+        let mut bank = ItemBank::new();
+        for (i, a) in [
+            vec![2.0, 0.1, 0.1],
+            vec![0.1, 2.0, 0.1],
+            vec![0.1, 0.1, 2.0],
+            vec![1.0, 1.0, 1.0],
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            bank.push(
+                Box::new(Dichotomous::m2pl(a, 0.0).unwrap()),
+                ItemMeta::new(i),
+            )
+            .unwrap();
+        }
+        bank
+    }
+
+    #[test]
+    fn d_rule_without_prior_scores_zero_while_answered_items_are_fewer_than_nfact() {
+        // Satu item terjawab + satu kandidat = dua matriks berpangkat 1 di
+        // ruang 3 dimensi, jadi determinannya 0 untuk setiap kandidat.
+        let bank = bank_3d();
+        let group = GroupParams::standard_normal(3);
+        let mut person = PersonState::new(3);
+        person.record_answer(0, 1);
+        let config = SelectionConfig {
+            criterion: Criterion::DRule { prior: false },
+            ..Default::default()
+        };
+
+        let scores = rank_candidates(&config, &[1, 2, 3], &person, &bank, &group).unwrap();
+
+        assert_eq!(scores.len(), 3);
+        for (idx, score) in scores {
+            assert!(
+                score.is_finite() && score.abs() < 1e-9,
+                "kandidat {idx}: skor {score} seharusnya ~0"
+            );
+        }
+    }
+
+    #[test]
+    fn d_rule_with_prior_scores_positive_while_answered_items_are_fewer_than_nfact() {
+        // Prior menambah invers `gcov` (= I di sini) sehingga total informasi
+        // definit positif dan determinannya tidak lagi 0.
+        let bank = bank_3d();
+        let group = GroupParams::standard_normal(3);
+        let mut person = PersonState::new(3);
+        person.record_answer(0, 1);
+        let config = SelectionConfig {
+            criterion: Criterion::DRule { prior: true },
+            ..Default::default()
+        };
+
+        let scores = rank_candidates(&config, &[1, 2, 3], &person, &bank, &group).unwrap();
+
+        for (idx, score) in scores {
+            assert!(score >= 1.0, "kandidat {idx}: skor {score} seharusnya >= 1");
+        }
+    }
+
+    #[test]
+    fn d_rule_without_prior_scores_positive_once_answered_items_reach_nfact() {
+        // Tiga item terjawab dengan slope bebas linear + satu kandidat:
+        // total berpangkat 3, determinannya bermakna.
+        let bank = bank_3d();
+        let group = GroupParams::standard_normal(3);
+        let mut person = PersonState::new(3);
+        for item in 0..3 {
+            person.record_answer(item, 1);
+        }
+        let config = SelectionConfig {
+            criterion: Criterion::DRule { prior: false },
+            ..Default::default()
+        };
+
+        let scores = rank_candidates(&config, &[3], &person, &bank, &group).unwrap();
+
+        assert!(scores[0].1 > 1e-3, "skor {} seharusnya > 1e-3", scores[0].1);
+    }
+
+    #[test]
+    fn out_of_bank_candidate_index_errors_not_panics() {
+        let bank = bank_2d();
+        let person = PersonState::new(2);
+        let group = GroupParams::standard_normal(2);
+        let config = SelectionConfig {
+            criterion: Criterion::DRule { prior: false },
+            ..Default::default()
+        };
+        let mut rng = StdRng::seed_from_u64(0);
+        assert!(select_next_item(&config, &[42], &person, &bank, &group, &mut rng).is_err());
+    }
+}
