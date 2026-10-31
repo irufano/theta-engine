@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: fmt + clippy + test + doc
+    runs-on: ubuntu-latest
+    env:
+      RUSTDOCFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: cargo test
+        run: cargo test --all-targets
+
+      # Fase 8: `#![deny(missing_docs)]` di `src/lib.rs` sudah menggagalkan
+      # `cargo build`/`cargo doc` sendiri bila ada item publik tanpa
+      # dokumentasi; `RUSTDOCFLAGS=-D warnings` (env job) menambah gate
+      # untuk lint rustdoc lain (mis. broken intra-doc link) yang TIDAK
+      # tertangkap `#![deny(missing_docs)]`.
+      - name: cargo doc --no-deps
+        run: cargo doc --no-deps
+
+      # Fitur `serde` (Fase 7, `McatResult` & tipe pendukungnya) opsional --
+      # tidak aktif di `cargo test`/`clippy` default di atas. Tiga step di
+      # bawah memastikan crate tetap compile, lolos clippy, dan doc-nya
+      # bersih saat fitur ini diaktifkan.
+      - name: cargo clippy (serde)
+        run: cargo clippy --all-targets --features serde -- -D warnings
+
+      - name: cargo test (serde)
+        run: cargo test --all-targets --features serde
+
+      - name: cargo doc --no-deps (serde)
+        run: cargo doc --no-deps --features serde
+
+      # Crate inti harus tetap compile untuk WebAssembly (dipakai lewat
+      # binding WASM di backend/frontend). Regresi tipikal: dependensi yang
+      # menarik `getrandom` tanpa fitur `js` (mis. `rand` dengan fitur `std`).
+      - name: cargo check (wasm32)
+        run: cargo check --target wasm32-unknown-unknown --features serde
