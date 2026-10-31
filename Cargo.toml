@@ -1,0 +1,41 @@
+[package]
+name = "theta-engine"
+version = "0.1.0"
+edition = "2021"
+description = "Multidimensional Computerized Adaptive Testing (MCAT) engine"
+license = "Apache-2.0"
+repository = "https://github.com/irufano/theta-engine"
+readme = "README.md"
+
+[dependencies]
+log = "0.4"
+nalgebra = "0.33"
+# Tanpa `getrandom` (fitur default): engine hanya memakai `StdRng` dengan seed
+# eksplisit dari pemanggil, tidak pernah entropi OS. `getrandom` gagal
+# dikompilasi di `wasm32-unknown-unknown` tanpa fitur `js`.
+rand = { version = "0.8", default-features = false, features = ["std_rng"] }
+serde = { version = "1", features = ["derive"], optional = true }
+thiserror = "1"
+
+[dev-dependencies]
+approx = "0.5"
+criterion = "0.5"
+proptest = "1"
+# `float_roundtrip`: tanpa ini, parser f64 default serde_json bisa meleset 1
+# ULP pada bilangan tertentu (dikonfirmasi lewat reproduksi manual saat Fase
+# 7 -- `serde_json::to_string(x)` lalu `from_str` TIDAK selalu menghasilkan
+# bit pattern f64 yang sama persis) -- fatal untuk test roundtrip serde yang
+# memakai `assert_eq!` eksak (bukan toleransi numerik) atas `ThetaVector`/
+# `SEVector` (Fase 7).
+serde_json = { version = "1", features = ["float_roundtrip"] }
+
+[features]
+default = []
+# Serialisasi/deserialisasi `McatResult` (Fase 7) & tipe pendukungnya ke/dari
+# JSON -- opt-in (bukan default), pemanggil yang butuh persist hasil lewat
+# HTTP/DB (lih. `docs/panduan/07-hasil-akhir-theta.md`) yang mengaktifkan.
+serde = ["dep:serde"]
+
+[[bench]]
+name = "theta_engine"
+harness = false
