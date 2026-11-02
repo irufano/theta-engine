@@ -1,6 +1,18 @@
+# Inti tetap `rlib`; binding WebAssembly ada di crate terpisah `wasm/` supaya
+# `crate-type = ["cdylib"]` dan dependensi wasm-bindgen tidak menyentuh inti.
+# `cargo build`/`test` tanpa `-p` hanya memproses inti.
+[workspace]
+members = ["wasm"]
+
+# Satu versi untuk inti dan binding: `engineVersion()` di paket npm
+# melaporkannya, dan dicatat bersama tiap pemilihan item agar hasil bisa
+# diulang dengan artefak yang sama.
+[workspace.package]
+version = "0.1.0"
+
 [package]
 name = "theta-engine"
-version = "0.1.0"
+version.workspace = true
 edition = "2021"
 description = "Multidimensional Computerized Adaptive Testing (MCAT) engine"
 license = "Apache-2.0"
@@ -39,3 +51,11 @@ serde = ["dep:serde"]
 [[bench]]
 name = "theta_engine"
 harness = false
+
+# Profil build artefak WebAssembly (`wasm/build.sh`). Profil hanya dibaca dari
+# root workspace, makanya ada di sini dan bukan di `wasm/Cargo.toml`.
+[profile.wasm-release]
+inherits = "release"
+opt-level = 3
+lto = true
+codegen-units = 1

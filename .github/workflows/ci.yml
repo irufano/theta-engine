@@ -57,7 +57,125 @@ jobs:
         run: cargo doc --no-deps --features serde
 
       # Crate inti harus tetap compile untuk WebAssembly (dipakai lewat
-      # binding WASM di backend/frontend). Regresi tipikal: dependensi yang
+      # binding WASM di backend, crate `wasm/`). Regresi tipikal: dependensi yang
       # menarik `getrandom` tanpa fitur `js` (mis. `rand` dengan fitur `std`).
       - name: cargo check (wasm32)
         run: cargo check --target wasm32-unknown-unknown --features serde
+
+  wasm:
+    name: binding wasm (test + build + bun)
+    runs-on: ubuntu-latest
+    env:
+      RUSTDOCFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: cargo clippy (wasm)
+        run: cargo clippy -p theta-engine-wasm --all-targets -- -D warnings
+
+      - name: cargo test (wasm, native)
+        run: cargo test -p theta-engine-wasm
+
+      - name: cargo doc --no-deps (wasm)
+        run: cargo doc --no-deps -p theta-engine-wasm
+
+      # `wasm-bindgen-cli` harus sama persis dengan crate `wasm-bindgen` di
+      # Cargo.lock; versinya dibaca dari lockfile agar tidak bisa berbeda.
+      - name: Install wasm-bindgen-cli (versi dari Cargo.lock)
+        run: |
+          version="$(awk '$0 == "name = \"wasm-bindgen\"" { getline; gsub(/[^0-9.]/, ""); print; exit }' Cargo.lock)"
+          test -n "$version"
+          if ! command -v wasm-bindgen >/dev/null || [ "$(wasm-bindgen --version | cut -d' ' -f2)" != "$version" ]; then
+            cargo install wasm-bindgen-cli --version "$version" --locked
+          fi
+
+      - name: Build paket npm
+        run: wasm/build.sh
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Uji artefak wasm (bun)
+        working-directory: wasm/tests/js
+        run: bun test
+
+      # Hanya membuat tarball; publikasi ke registry dilakukan terpisah.
+      - name: npm pack
+        working-directory: wasm/pkg
+        run: npm pack --pack-destination "$RUNNER_TEMP"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: theta-engine-wasm-npm
+          path: ${{ runner.temp }}/*.tgz
+          if-no-files-found: error
+
+  # Rilis otomatis tiap push ke `main`: tag `vX.Y.Z` (dari versi di
+  # `[workspace.package]`) dibuat bersama GitHub Release, dengan tarball npm
+  # terlampir supaya bisa dipasang dari URL publik yang versinya terkunci:
+  #   bun add https://github.com/<org>/<repo>/releases/download/vX.Y.Z/<tarball>
+  # Tag dibuat lewat `gh release create --target`, bukan `git push --tags`:
+  # tag yang didorong dengan GITHUB_TOKEN tidak memicu workflow lain.
+  # Bila tag untuk versi itu sudah ada, job berhenti tanpa gagal; naikkan
+  # versi di Cargo.toml untuk merilis. Tidak mempublikasikan ke registry npm.
+  release:
+    name: rilis GitHub (tarball npm)
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [check, wasm]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: release
+      cancel-in-progress: false
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: theta-engine-wasm-npm
+          path: dist
+
+      - name: Baca versi dari paket
+        id: version
+        run: |
+          set -euo pipefail
+          tarball="$(ls dist/*.tgz)"
+          version="$(tar -xzOf "$tarball" package/package.json | jq -r .version)"
+          test -n "$version" && test "$version" != "null"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+
+      - name: Cek tag
+        id: tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" >/dev/null 2>&1; then
+            echo "tag $TAG sudah ada: tidak ada rilis baru (naikkan versi untuk merilis)"
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Buat tag dan release
+        if: steps.tag.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum ./*.tgz > SHA256SUMS
+          gh release create "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "$TAG" \
+            --generate-notes \
+            ./*.tgz SHA256SUMS

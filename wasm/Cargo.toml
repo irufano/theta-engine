@@ -1,0 +1,21 @@
+[package]
+name = "theta-engine-wasm"
+version.workspace = true
+edition = "2021"
+description = "Binding WebAssembly (wasm-bindgen) untuk theta-engine"
+license = "Apache-2.0"
+repository = "https://github.com/irufano/theta-engine"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+theta-engine = { path = "..", features = ["serde"] }
+js-sys = "0.3"
+rand = { version = "0.8", default-features = false, features = ["std_rng"] }
+serde = { version = "1", features = ["derive"] }
+serde-wasm-bindgen = "0.6"
+# `float_roundtrip`: tanpa ini serde_json bisa meleset 1 ULP saat membaca f64.
+serde_json = { version = "1", features = ["float_roundtrip"] }
+wasm-bindgen = "0.2"

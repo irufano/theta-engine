@@ -69,6 +69,9 @@ untuk quickstart lengkap fondasi IRT. Contoh lain per fase ada di
 - [`docs/panduan/`](docs/panduan/) — panduan penggunaan API per fase
   (mulai dari
   [`00-instalasi-dan-quickstart.md`](docs/panduan/00-instalasi-dan-quickstart.md)).
+- [`wasm/README.md`](wasm/README.md) — binding WebAssembly (paket npm
+  `@dayatech/theta-engine-wasm`) untuk backend Node/Bun: pemakaian, kontrak
+  galat, build, dan pengujian.
 - `cargo doc --no-deps --open` — dokumentasi API level crate (`rustdoc`).
 
 ## Scope & Non-Scope

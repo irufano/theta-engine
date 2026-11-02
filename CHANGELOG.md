@@ -38,6 +38,19 @@ pertama.
 
 ### Added
 
+- Crate binding `theta-engine-wasm` (`wasm/`, anggota workspace) berbasis
+  `wasm-bindgen`, dikemas sebagai paket npm `@dayatech/theta-engine-wasm` untuk
+  Node/Bun lewat `wasm/build.sh`. Satu `Engine` per definisi tes
+  (`new Engine(spec)`) menyediakan `start`, `next(state, seed)`,
+  `submit(state, index, response, elapsedMs)`, dan `finish(state)`; state sesi
+  masuk dan keluar sebagai JSON sehingga bisa disimpan di database. Spec dan
+  state divalidasi terhadap bank, dan kombinasi yang pasti gagal di tengah sesi
+  (content balancing dengan `Seq`, exposure dengan kriteria tanpa skor,
+  kriteria satu dimensi pada `nfact > 1`, panjang vektor stopping rule)
+  ditolak saat konstruksi. Galat berupa `Error` JS `McatError` dengan `code`
+  stabil. Pengujian: `cargo test -p theta-engine-wasm`, uji Bun atas artefak
+  wasm, dan fixture emas yang membandingkan hasil native dan wasm. Job CI baru
+  `wasm`. Versi inti dan binding disatukan lewat `[workspace.package]`.
 - Lima kriteria seleksi item khusus `nfact = 1`: `Criterion::{Mlwi, Mpwi,
   Mepv, Mei, Ikl}`. Kelimanya merata-ratakan besaran item kandidat atas
   posterior `theta` lewat grid 61 titik pada `[-6, 6]` (aturan trapesium):

@@ -1,0 +1,481 @@
+{
+  "expected": {
+    "items": [
+      4,
+      29,
+      9,
+      19,
+      23,
+      3,
+      13,
+      14,
+      18,
+      22,
+      2,
+      12
+    ],
+    "se_thetas": [
+      0.6253513980001143,
+      0.6215006079966914,
+      0.6138210292938845
+    ],
+    "thetas": [
+      -0.06267335687465937,
+      -0.3281344880295076,
+      0.3791247362725412
+    ]
+  },
+  "spec": {
+    "content_balancing": {
+      "category_per_item": [
+        "verbal",
+        "numerik",
+        "spasial",
+        "verbal",
+        "numerik",
+        "spasial",
+        "verbal",
+        "numerik",
+        "spasial",
+        "verbal",
+        "numerik",
+        "spasial",
+        "verbal",
+        "numerik",
+        "spasial",
+        "verbal",
+        "numerik",
+        "spasial",
+        "verbal",
+        "numerik",
+        "spasial",
+        "verbal",
+        "numerik",
+        "spasial",
+        "verbal",
+        "numerik",
+        "spasial",
+        "verbal",
+        "numerik",
+        "spasial"
+      ],
+      "target_prop": {
+        "numerik": 0.3333333333333333,
+        "spasial": 0.3333333333333333,
+        "verbal": 0.3333333333333333
+      }
+    },
+    "estimation": {
+      "debug": false,
+      "method": {
+        "Eap": {
+          "qmc": false
+        }
+      },
+      "quadpts": null
+    },
+    "exposure": {
+      "SympsonHetter": [
+        0.5,
+        1.0,
+        1.0,
+        1.0,
+        0.5,
+        1.0,
+        1.0,
+        1.0,
+        0.5,
+        1.0,
+        1.0,
+        1.0,
+        0.5,
+        1.0,
+        1.0,
+        1.0,
+        0.5,
+        1.0,
+        1.0,
+        1.0,
+        0.5,
+        1.0,
+        1.0,
+        1.0,
+        0.5,
+        1.0,
+        1.0,
+        1.0,
+        0.5,
+        1.0
+      ]
+    },
+    "group": {
+      "gcov": [
+        [
+          1.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          1.0,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "gmeans": [
+        0.0,
+        0.0,
+        0.0
+      ]
+    },
+    "items": [
+      {
+        "a": [
+          0.8,
+          0.2,
+          0.2
+        ],
+        "d": -1.2000000000000002,
+        "type": "dichotomous"
+      },
+      {
+        "a": [
+          0.2,
+          1.0,
+          0.2
+        ],
+        "d": -0.8,
+        "type": "dichotomous"
+      },
+      {
+        "a": [
+          0.2,
+          0.2,
+          1.2000000000000002
+        ],
+        "d": -0.4,
+        "type": "dichotomous"
+      },
+      {
+        "a": [
+          1.4000000000000001,
+          0.2,
+          0.2
+        ],
+        "d": 0.0,
+        "type": "dichotomous"
+      },
+      {
+        "a": [
+          0.2,
+          1.6,
+          0.2
+        ],
+        "d": 0.4,
+        "type": "dichotomous"
+      },
+      {
+        "a": [
+          0.2,
+          0.2,
+          0.8
+        ],
+        "d": 0.8,
+        "type": "dichotomous"
+      },
+      {
+        "a": [
+          1.0,
+          0.2,
+          0.2
+        ],
+        "d": 1.2000000000000002,
+        "type": "dichotomous"
+      },
+      {
+        "a": [
+          0.2,
+          1.2000000000000002,
+          0.2
+        ],
+        "d": -1.2000000000000002,
+        "type": "dichotomous"
+      },
+      {
+        "a": [
+          0.2,
+          0.2,
+          1.4000000000000001
+        ],
+        "d": -0.8,
+        "type": "dichotomous"
+      },
+      {
+        "a": [
+          1.6,
+          0.2,
+          0.2
+        ],
+        "d": -0.4,
+        "type": "dichotomous"
+      },
+      {
+        "a": [
+          0.2,
+          0.8,
+          0.2
+        ],
+        "d": 0.0,
+        "type": "dichotomous"
+      },
+      {
+        "a": [
+          0.2,
+          0.2,
+          1.0
+        ],
+        "d": 0.4,
+        "type": "dichotomous"
+      },
+      {
+        "a": [
+          1.2000000000000002,
+          0.2,
+          0.2
+        ],
+        "d": 0.8,
+        "type": "dichotomous"
+      },
+      {
+        "a": [
+          0.2,
+          1.4000000000000001,
+          0.2
+        ],
+        "d": 1.2000000000000002,
+        "type": "dichotomous"
+      },
+      {
+        "a": [
+          0.2,
+          0.2,
+          1.6
+        ],
+        "d": -1.2000000000000002,
+        "type": "dichotomous"
+      },
+      {
+        "a": [
+          0.8,
+          0.2,
+          0.2
+        ],
+        "d": -0.8,
+        "type": "dichotomous"
+      },
+      {
+        "a": [
+          0.2,
+          1.0,
+          0.2
+        ],
+        "d": -0.4,
+        "type": "dichotomous"
+      },
+      {
+        "a": [
+          0.2,
+          0.2,
+          1.2000000000000002
+        ],
+        "d": 0.0,
+        "type": "dichotomous"
+      },
+      {
+        "a": [
+          1.4000000000000001,
+          0.2,
+          0.2
+        ],
+        "d": 0.4,
+        "type": "dichotomous"
+      },
+      {
+        "a": [
+          0.2,
+          1.6,
+          0.2
+        ],
+        "d": 0.8,
+        "type": "dichotomous"
+      },
+      {
+        "a": [
+          0.2,
+          0.2,
+          0.8
+        ],
+        "d": 1.2000000000000002,
+        "type": "dichotomous"
+      },
+      {
+        "a": [
+          1.0,
+          0.2,
+          0.2
+        ],
+        "d": -1.2000000000000002,
+        "type": "dichotomous"
+      },
+      {
+        "a": [
+          0.2,
+          1.2000000000000002,
+          0.2
+        ],
+        "d": -0.8,
+        "type": "dichotomous"
+      },
+      {
+        "a": [
+          0.2,
+          0.2,
+          1.4000000000000001
+        ],
+        "d": -0.4,
+        "type": "dichotomous"
+      },
+      {
+        "a": [
+          1.6,
+          0.2,
+          0.2
+        ],
+        "d": 0.0,
+        "type": "dichotomous"
+      },
+      {
+        "a": [
+          0.2,
+          0.8,
+          0.2
+        ],
+        "d": 0.4,
+        "type": "dichotomous"
+      },
+      {
+        "a": [
+          0.2,
+          0.2,
+          1.0
+        ],
+        "d": 0.8,
+        "type": "dichotomous"
+      },
+      {
+        "a": [
+          1.2000000000000002,
+          0.2,
+          0.2
+        ],
+        "d": 1.2000000000000002,
+        "type": "dichotomous"
+      },
+      {
+        "a": [
+          0.2,
+          1.4000000000000001,
+          0.2
+        ],
+        "d": -1.2000000000000002,
+        "type": "dichotomous"
+      },
+      {
+        "a": [
+          0.2,
+          0.2,
+          1.6
+        ],
+        "d": -0.8,
+        "type": "dichotomous"
+      }
+    ],
+    "selection": {
+      "criterion": {
+        "DRule": {
+          "prior": true
+        }
+      },
+      "debug": false,
+      "weights": null
+    },
+    "stopping": {
+      "allow_constrain_breaks": false,
+      "classify": "None",
+      "debug": false,
+      "delta_thetas": [
+        0.0
+      ],
+      "max_items": 12,
+      "max_time": null,
+      "min_items": 1,
+      "min_sem": [
+        0.0
+      ]
+    }
+  },
+  "steps": [
+    {
+      "response": 0,
+      "seed": 1000
+    },
+    {
+      "response": 0,
+      "seed": 1017
+    },
+    {
+      "response": 1,
+      "seed": 1034
+    },
+    {
+      "response": 0,
+      "seed": 1051
+    },
+    {
+      "response": 1,
+      "seed": 1068
+    },
+    {
+      "response": 0,
+      "seed": 1085
+    },
+    {
+      "response": 1,
+      "seed": 1102
+    },
+    {
+      "response": 1,
+      "seed": 1119
+    },
+    {
+      "response": 0,
+      "seed": 1136
+    },
+    {
+      "response": 1,
+      "seed": 1153
+    },
+    {
+      "response": 0,
+      "seed": 1170
+    },
+    {
+      "response": 1,
+      "seed": 1187
+    }
+  ]
+}
